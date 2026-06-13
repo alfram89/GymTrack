@@ -38,6 +38,10 @@ Everything lives in `src/`, organised into:
 | `src/i18n/` | `en.json` and translation loader |
 | `src/utils/` | `programGenerator.js` (AI-style program builder logic) |
 
+Top-level files in `src/`: `App.jsx` (all state), `helpers.js` (uid, fmtTime, localISODate, weekOf, calcVol, isCardioSet/isTimeSet, newCardioInterval, validateBackup), `constants.js` (MUSCLE_COLORS, DIFF_COLORS, re-exports EXERCISES from exercises.json), `db.js` (persistence), `Icons.jsx`, `BarbellIcon.jsx`, `TemplatePicker.jsx`, `main.jsx`, `index.css`.
+
+The app is an installable PWA: `vite.config.js` configures `vite-plugin-pwa` (service worker, manifest, font caching).
+
 ### Data flow
 
 `App` (in `App.jsx`) owns all state and passes it down as props. There is no context, no global store. The component tree is:
@@ -46,11 +50,12 @@ Everything lives in `src/`, organised into:
 App
 ├── Onboarding          (first-run only, src/components/Onboarding.jsx)
 ├── WheelPicker         (fixed-position overlay, opened by any number input)
-├── TemplatePicker      (src/TemplatePicker.jsx — fixed-position overlay)
+├── TemplatePicker      (src/TemplatePicker.jsx — fixed-position overlay, opened from ProgramsTab)
 ├── WorkoutSummary      (fixed-position overlay, shown after finishing a workout)
 ├── ProgramWizard       (fixed-position overlay, generates a personalised program)
-└── <tab content>
-    ├── ProgramTab      ── CardioExCard (src/components/CardioExCard.jsx, per cardio exercise)
+└── <tab content>       (5 tabs: Workout, Programs, Library, History, Settings)
+    ├── ProgramTab      ── CardioExCard (src/components/CardioExCard.jsx, per cardio exercise) — the "Workout" tab
+    ├── ProgramsTab     (src/tabs/ProgramsTab.jsx — program list: switch / rename / duplicate / delete)
     ├── LibraryTab
     ├── HistoryTab
     └── SettingsTab
@@ -58,17 +63,21 @@ App
 
 All tab components receive `t` (the current translations object) as their first prop.
 
+### Multi-program model
+
+The app stores a **list of programs** (`programs` state in `App`), each `{ id, name, days, program }` where `days`/`program` have the same shape as a single program ever did. `activeProgramId` (persisted in `settings`) selects the active one. `App` derives `days`/`program` from the active program and exposes **wrapper setters** `setDays`/`setProgram` that write changes back into the active program's slot — so `ProgramTab`, `LibraryTab` and `SettingsTab` keep their original `days`/`setDays`/`program`/`setProgram` interface unchanged. Switching programs is lossless (each program keeps its own weights). `ProgramsTab` manages the list; `applyTemplate(tpl, mode)` creates a new program (`mode !== 'add'`) or appends days to the active one (`'add'`). `buildProgramDays` (in `helpers.js`) expands a template into live `{ days, program }` and is shared by templates, the wizard, and legacy migration.
+
 ### Persistence
 
 `src/db.js` wraps Dexie (IndexedDB) as a simple key-value store via `dbGet(key)` / `dbSet(key, value)`. `loadAllData()` fetches all keys in parallel on mount.
 
-Keys in use: `settings`, `days`, `program`, `history`, `customExercises`, `userTemplates`.
+Keys in use: `settings` (includes `activeProgramId`, `selectedDay`), `programs` (the program list), `history`, `customExercises`, `activeWorkout` (in-flight workout so it survives a refresh — includes `programId`; `null` when no workout is running). Legacy keys `days`, `program` and `userTemplates` are no longer written but are still read on load and migrated into `programs` the first time (see `migrateLegacy` in `App.jsx`).
 
 Every piece of state that needs persistence has a corresponding `useEffect` in `App` that calls `dbSet` whenever it changes. The `loaded` flag gates all writes so initial DB hydration doesn't overwrite itself.
 
 ### Exercise data
 
-`src/data/exercises.json` — 57 exercises, each with `{ id, name, mg, eq, dif }`. Cardio exercises additionally have `type: "cardio"` and a `metrics` array. `id` is the stable reference key used everywhere else (program slots, templates, history).
+`src/data/exercises.json` — 83 exercises (67 strength, 16 cardio), each with `{ id, name, mg, eq, dif }`. Cardio exercises additionally have `type: "cardio"` and a `metrics` array. `id` is the stable reference key used everywhere else (program slots, templates, history).
 
 Valid values:
 - `mg`: `chest` `back` `legs` `shoulders` `arms` `core` `cardio`
@@ -76,13 +85,15 @@ Valid values:
 - `dif`: `beginner` `intermediate` `advanced`
 - `metrics` (cardio only): `duration` `distance` `speed` `incline` `calories` `heart_rate` `resistance`
 
+Optional fields the UI honours: `inputMode: "time"` (sets track `secs` instead of reps/weight, e.g. plank), `weightLabel` (`"kg/hand"` or `"added"`), `repsMax`, `weightMax`, `weightStep` (wheel-picker ranges).
+
 ### Program templates
 
 `src/data/templates/*.json` — each file is one template. `src/data/templates/index.js` uses `import.meta.glob` to load them all automatically; **no index update needed when adding a new file**.
 
-Template schema: `{ id, name, description, tags[], days: [{ name, exercises: [{ exerciseId, sets, reps, restTime }] }] }`.
+Template schema: `{ id, name, description, tags[], days: [{ name, exercises: [{ exerciseId, sets, reps, restTime }] }] }`. Per exercise, `reps` is replaced by `secs` for time-mode exercises and by `duration` (minutes) for cardio exercises; `buildProgramDays` in `helpers.js` expands the `sets` count into the right set/interval shape.
 
-User-saved templates follow the same schema and are stored in IndexedDB under `userTemplates`.
+Users create their own programs in the Programs tab (from a template, the wizard, or by duplicating); these live in the `programs` list, not as separate templates. The backup file is **version 2**: `{ version: 2, programs, activeProgramId, history, customExercises, settings }`. Import (`validateBackup` + `importData` in `App.jsx`) accepts both v2 and the legacy `days`/`program`/`userTemplates` shape (the latter runs through the same migration as DB load).
 
 ### Translations
 
